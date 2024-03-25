@@ -2,6 +2,7 @@ import torch
 import numpy as np
 from tqdm import tqdm
 from ddpm import DDPMSampler
+from transformers import CLIPTokenizer
 
 WIDTH = 512
 HEIGHT = 512
@@ -21,7 +22,7 @@ def generate(
     seed=None,
     device=None,
     idle_device=None,
-    tokenizer=None,
+    tokenizer:CLIPTokenizer=None,
 ):
     with torch.no_grad():
         if not 0 < strength <= 1:
