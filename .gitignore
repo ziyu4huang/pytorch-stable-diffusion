@@ -161,5 +161,7 @@ cython_debug/
 
 data/
 images/
+runs/
+image.png
 
 .DS_Store

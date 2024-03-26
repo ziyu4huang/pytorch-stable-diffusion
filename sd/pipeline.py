@@ -7,6 +7,9 @@ from clip import CLIP
 from encoder import VAE_Encoder
 from decoder import VAE_Decoder
 from diffusion import Diffusion
+from omegaconf import OmegaConf
+
+from torch.utils.tensorboard import SummaryWriter
 
 WIDTH = 512
 HEIGHT = 512
@@ -27,8 +30,20 @@ def generate(
     device=None,
     idle_device=None,
     tokenizer:CLIPTokenizer=None,
+    write_graph=False,
 ):
     with torch.no_grad():
+
+
+        config = OmegaConf.create()
+        config.experiment_name = "base"
+
+        if write_graph:
+            writer_clip = SummaryWriter('runs/trace_clip')
+            writer_encoder = SummaryWriter('runs/trace_encoder')
+            writer_diffusion = SummaryWriter('runs/trace_diffusion')
+            writer_decoder = SummaryWriter('runs/trace_decoder')
+
         if not 0 < strength <= 1:
             raise ValueError("strength must be between 0 and 1")
 
@@ -57,6 +72,13 @@ def generate(
             cond_tokens = torch.tensor(cond_tokens, dtype=torch.long, device=device)
             # (Batch_Size, Seq_Len) -> (Batch_Size, Seq_Len, Dim)
             cond_context = clip_obj(cond_tokens)
+
+            if write_graph:
+                print("trace CFG CLIP graph...")
+                writer_clip.add_graph(clip_obj, (cond_tokens), use_strict_trace=False)
+                writer_clip.close()
+                print("DONE trace CFG CLIP graph...")
+
             # Convert into a list of length Seq_Len=77
             uncond_tokens = tokenizer.batch_encode_plus(
                 [uncond_prompt], padding="max_length", max_length=77
@@ -76,6 +98,13 @@ def generate(
             tokens = torch.tensor(tokens, dtype=torch.long, device=device)
             # (Batch_Size, Seq_Len) -> (Batch_Size, Seq_Len, Dim)
             context = clip_obj(tokens)
+            if write_graph:
+                print("trace no-cond CLIP graph...")
+                writer_clip.add_graph(clip_obj, (tokens), use_strict_trace=False)
+                writer_clip.close()
+                print("DONE trace no-cond CLIP graph...")
+
+
         to_idle(clip_obj)
 
         if sampler_name == "ddpm":
@@ -107,6 +136,12 @@ def generate(
             # (Batch_Size, 4, Latents_Height, Latents_Width)
             latents = encoder_obj(input_image_tensor, encoder_noise)
 
+            if write_graph:
+                print("trace Encoder graph...")
+                writer_encoder.add_graph(encoder_obj, (input_image_tensor, encoder_noise), use_strict_trace=True)
+                writer_encoder.close()
+                print("DONE trace Encoder graph...")
+
             # Add noise to the latents (the encoded input image)
             # (Batch_Size, 4, Latents_Height, Latents_Width)
             sampler.set_strength(strength=strength)
@@ -121,7 +156,9 @@ def generate(
         diffusion_obj.to(device)
 
         timesteps = tqdm(sampler.timesteps)
+        index = 0
         for i, timestep in enumerate(timesteps):
+            index += 1
             # (1, 320)
             time_embedding = get_time_embedding(timestep).to(device)
 
@@ -136,6 +173,12 @@ def generate(
             # (Batch_Size, 4, Latents_Height, Latents_Width) -> (Batch_Size, 4, Latents_Height, Latents_Width)
             model_output = diffusion_obj(model_input, context, time_embedding)
 
+            if index == 1:
+                print("trace Diffusion graph...")
+                writer_diffusion.add_graph(diffusion_obj, (model_input, context, time_embedding), use_strict_trace=False)
+                writer_diffusion.close()
+                print("DONE trace Diffusion graph...")
+
             if do_cfg:
                 output_cond, output_uncond = model_output.chunk(2)
                 model_output = cfg_scale * (output_cond - output_uncond) + output_uncond
@@ -149,6 +192,13 @@ def generate(
         decoder_obj.to(device)
         # (Batch_Size, 4, Latents_Height, Latents_Width) -> (Batch_Size, 3, Height, Width)
         images = decoder_obj(latents)
+
+        if write_graph:
+            print("trace Decoder graph...")
+            writer_decoder.add_graph(decoder_obj, (latents), use_strict_trace=False)
+            writer_decoder.close()
+            print("DONE trace Decoder graph...")
+
         to_idle(decoder_obj)
 
         images = rescale(images, (-1, 1), (0, 255), clamp=True)
